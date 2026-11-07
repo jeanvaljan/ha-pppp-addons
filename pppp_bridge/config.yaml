@@ -1,5 +1,5 @@
 name: PPPP Camera Bridge
-version: "0.2.0"
+version: "0.2.1"
 slug: pppp_bridge
 description: Stream local (fără cloud) pentru camere ieftine PPPP/iLnk (A9, X5, bec E27, app AX iot / Little Stars etc.)
 url: https://github.com/jeanvaljan/ha-pppp-addons

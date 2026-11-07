@@ -1,4 +1,5 @@
 #!/usr/bin/with-contenv bashio
+set +e +u +o pipefail
 IP=$(bashio::config 'camera_ip')
 PORT=$(bashio::config 'port')
 WD=$(bashio::config 'watchdog_interval')
