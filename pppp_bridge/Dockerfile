@@ -1,6 +1,6 @@
 ARG BUILD_FROM
 FROM $BUILD_FROM
-RUN apk add --no-cache python3 \
+RUN apk add --no-cache python3 curl \
  && apk add --no-cache --virtual .build build-base python3-dev \
  && python3 -m venv /opt/pppp \
  && /opt/pppp/bin/pip install --no-cache-dir aiopppp==0.2.3 \

@@ -1,5 +1,5 @@
 name: PPPP Camera Bridge
-version: "0.1.0"
+version: "0.2.0"
 slug: pppp_bridge
 description: Stream local (fără cloud) pentru camere ieftine PPPP/iLnk (A9, X5, bec E27, app AX iot / Little Stars etc.)
 url: https://github.com/jeanvaljan/ha-pppp-addons
@@ -16,9 +16,11 @@ options:
   password: admin
   port: 4000
   log_level: warning
+  watchdog_interval: 60
 schema:
   camera_ip: str?
   username: str
   password: password
   port: port
   log_level: list(debug|info|warning|error)
+  watchdog_interval: int(20,3600)
