@@ -306,14 +306,21 @@ async def tcp_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 # ---------------- UDP (probabil media) ----------------
 
 class UdpUpstream(asyncio.DatagramProtocol):
-    def __init__(self, front, client):
-        self.front, self.client, self.transport = front, client, None
+    """Socket nelegat de o adresă: primește de la server ȘI de la peer-ul P2P (telefon)."""
+
+    def __init__(self, front, client, server):
+        self.front, self.client, self.server, self.transport = front, client, server, None
+        self.peers: set = set()
 
     def connection_made(self, transport):
         self.transport = transport
 
     def datagram_received(self, data, addr):
-        self.front.stat("<", self.client, data)
+        tag = "<" if addr == self.server else "P"
+        if tag == "P" and addr not in self.peers:
+            self.peers.add(addr)
+            journal(f"UDP peer nou {addr[0]}:{addr[1]} -> sonerie {self.client}")
+        self.front.stat(tag, self.client, data, src=addr)
         self.front.transport.sendto(data, self.client)
 
 
@@ -329,13 +336,14 @@ class UdpFront(asyncio.DatagramProtocol):
     def connection_made(self, transport):
         self.transport = transport
 
-    def stat(self, tag, client, data):
+    def stat(self, tag, client, data, src=None):
         key = (tag, client)
         c = self.counters.setdefault(key, [0, 0, time.time()])
         c[0] += 1
         c[1] += len(data)
-        if c[0] <= 5:
-            journal(f"UDP{tag} {client[0]}:{client[1]} {len(data)}B {data[:48].hex(' ')}")
+        if c[0] <= (40 if tag == "P" else 5):
+            who = f" de la {src[0]}:{src[1]}" if src else ""
+            journal(f"UDP{tag} {client[0]}:{client[1]}{who} {len(data)}B {data[:64].hex(' ')}")
         if TCP_CAPTURE:
             if self.fh is None:
                 SHARE.mkdir(parents=True, exist_ok=True)
@@ -352,21 +360,21 @@ class UdpFront(asyncio.DatagramProtocol):
             host, port = (next(iter(REAL_TCP.values()), None)
                           or (UPSTREAM_TCP.split(":")[0], int(UPSTREAM_TCP.split(":")[1])))
             loop = asyncio.get_running_loop()
-            up = UdpUpstream(self, addr)
+            up = UdpUpstream(self, addr, (host, port))
             self.ups[addr] = up
-            asyncio.ensure_future(loop.create_datagram_endpoint(lambda: up, remote_addr=(host, port)))
+            asyncio.ensure_future(loop.create_datagram_endpoint(lambda: up, local_addr=("0.0.0.0", 0)))
             journal(f"UDP~ {addr} -> upstream {host}:{port}")
             # primul pachet îl trimitem după ce endpoint-ul e gata
             async def later():
                 for _ in range(50):
                     if up.transport:
-                        up.transport.sendto(data)
+                        up.transport.sendto(data, up.server)
                         return
                     await asyncio.sleep(0.02)
             asyncio.ensure_future(later())
             return
         if up.transport:
-            up.transport.sendto(data)
+            up.transport.sendto(data, up.server)
 
 
 async def udp_summary(front: UdpFront):
