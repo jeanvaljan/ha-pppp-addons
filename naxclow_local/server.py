@@ -418,6 +418,7 @@ async def main():
     front = UdpFront()
     await asyncio.get_running_loop().create_datagram_endpoint(lambda: front, local_addr=("0.0.0.0", TCP_PORT))
     HUB.udp = front.transport
+    asyncio.ensure_future(HUB.dbg_summary())
     asyncio.ensure_future(udp_summary(front))
     LOG.info("UDP pe :%d", TCP_PORT)
     async with srv:

@@ -86,7 +86,8 @@ class LocalHub:
         self.auto_stream = auto_stream
         self.max_stream = max_stream
         self.udp = None  # transport
-        self.cli_port = 29839  # port „client" anunțat în code 11 (nu ascultă nimic)
+        self.cli_port = 29838  # portul „client" anunțat în code 11 = socket-ul nostru UDP
+        self.dbg: dict = {}
 
     # ---------- TCP ----------
     async def handle_tcp(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -147,10 +148,17 @@ class LocalHub:
     # ---------- UDP ----------
     def handle_udp(self, data: bytes, addr: tuple):
         if len(data) < 20:
+            self.journal(f"L-UDP> scurt {addr} {data.hex(' ')}")
             return
         ln, typ, flag, b7 = struct.unpack_from("<IHBB", data)
         seq = struct.unpack_from("<I", data, 16)[0]
         payload = data[20:20 + ln]
+        k = (addr, typ)
+        c = self.dbg.setdefault(k, [0, 0])
+        c[0] += 1
+        c[1] += len(data)
+        if c[0] <= 6:
+            self.journal(f"L-UDP> {addr[0]}:{addr[1]} typ={typ} hdr={data[:20].hex()} {payload[:120]!r}")
         dev = self.by_ip.get(addr[0])
         if typ == 0 and payload[:1] == b"{":
             try:
@@ -188,6 +196,14 @@ class LocalHub:
                 self.video(dev, flag, payload)
             elif dev.audio:
                 dev.audio.write(payload)
+
+    async def dbg_summary(self):
+        while True:
+            await asyncio.sleep(10)
+            for (addr, typ), c in list(self.dbg.items()):
+                if c[0] > 6:
+                    self.journal(f"L-UDP rezumat {addr[0]}:{addr[1]} typ={typ}: {c[0]} pachete, {c[1]} B")
+            self.dbg.clear()
 
     def ack(self, dev: Device, seq: int):
         dev.acks.append(seq)
