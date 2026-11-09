@@ -1,5 +1,5 @@
 name: Naxclow Local
-version: "0.1.0"
+version: "0.2.0"
 slug: naxclow_local
 description: Server local pentru sonerii pe platforma Naxclow (app X Smart Home) - alertă + poză în HA, fără cloud
 url: https://github.com/jeanvaljan/ha-pppp-addons
@@ -13,11 +13,17 @@ map:
   - homeassistant_config:rw
   - share:rw
 options:
+  mode: proxy
+  upstream_http: 47.251.54.125
+  upstream_tcp: "107.149.136.10:29838"
   tcp_host: ""
   tcp_port: 29838
   tcp_capture: true
   log_level: info
 schema:
+  mode: list(local|proxy)
+  upstream_http: str
+  upstream_tcp: str
   tcp_host: str?
   tcp_port: port
   tcp_capture: bool
