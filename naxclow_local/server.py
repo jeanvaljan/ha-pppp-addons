@@ -219,6 +219,9 @@ def local_reply(path: str, f: dict):
     dev = f.get("devicesCode") or f.get("deviceCode") or "unknown"
     if path.endswith("/v6SendAlert"):
         return web.Response(text=jdump(local_alert_response(dev)), content_type="application/json")
+    if "SendBase64IMG" in path or path == "/favicon.ico":
+        return web.Response(text=jdump({"code": 200, "message": "操作成功", "data": None}),
+                            content_type="application/json")
     LOG.warning("Endpoint fără răspuns cunoscut: %s", path)
     return web.Response(text=jdump({"code": 200, "message": "操作成功", "data": None}),
                         content_type="application/json")

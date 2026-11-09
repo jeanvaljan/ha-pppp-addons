@@ -86,6 +86,7 @@ class LocalHub:
         self.auto_stream = auto_stream
         self.max_stream = max_stream
         self.udp = None  # transport
+        self.cli_port = 29839  # port „client" anunțat în code 11 (nu ascultă nimic)
 
     # ---------- TCP ----------
     async def handle_tcp(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -124,6 +125,9 @@ class LocalHub:
                             asyncio.ensure_future(self.start_stream(dev, self.auto_stream, reason="auto"))
                     else:
                         self.journal(f"L-TCP> {jb(js).decode()[:300]}")
+                        if code == 12 and dev and js.get("status") == 200 and js.get("devNatIp"):
+                            dev.udp_addr = (js["devNatIp"], int(js["devNatPort"]))
+                            dev.udp_ready.set()
                 await writer.drain()
         except Exception as e:  # noqa: BLE001
             LOG.debug("TCP local %s: %s", peer, e)
@@ -229,11 +233,6 @@ class LocalHub:
             return True
         if not dev.online:
             return False
-        try:
-            await asyncio.wait_for(dev.udp_ready.wait(), 6)
-        except asyncio.TimeoutError:
-            LOG.warning("%s: nu am adresa UDP, nu pot porni stream-ul", dev.uid)
-            return False
         dev.streaming = True
         dev.stop_at = time.time() + seconds
         dev.stream_task = asyncio.ensure_future(self._session(dev, reason))
@@ -255,6 +254,9 @@ class LocalHub:
         dev.audio = open(clips / f"{dev.uid}_{ts}.alaw", "wb")
         LOG.info("%s: pornesc stream (%s, fid %s)", dev.uid, reason, fid)
         try:
+            if not await self._wake_udp(dev):
+                LOG.warning("%s: soneria nu s-a înregistrat pe UDP, renunț", dev.uid)
+                return
             self.tcp_send(dev, {"code": 31, "status": 200, "target": dev.cli_id, "forwardId": fid})
             hello = jb({"code": 50, "cliToken": secrets.token_hex(4), "devTarget": dev.uid,
                         "cliId": dev.cli_id, "devToken": dev.token})
@@ -291,6 +293,29 @@ class LocalHub:
                 await self.fire_event({"device": dev.uid, "kind": "clip", "reason": reason,
                                        "frames": dev.frames, "clip": str(dev.clip_path)})
             self._prune(clips)
+
+    async def _wake_udp(self, dev: Device) -> bool:
+        """code 11 (cerere de conectare client) face soneria să se înregistreze pe UDP."""
+        if dev.udp_ready.is_set():
+            return True
+        me = self.my_ip(dev)
+        for attempt in range(4):
+            self.tcp_send(dev, {"code": 11, "cliTarget": dev.cli_id, "cliToken": secrets.token_hex(4),
+                                "cliIp": me, "cliPort": self.cli_port, "cliNatIp": me,
+                                "cliNatPort": self.cli_port})
+            try:
+                await asyncio.wait_for(dev.udp_ready.wait(), 3.5)
+                return True
+            except asyncio.TimeoutError:
+                if not dev.online:
+                    return False
+        return dev.udp_ready.is_set()
+
+    def my_ip(self, dev: Device) -> str:
+        try:
+            return dev.writer.get_extra_info("sockname")[0]
+        except Exception:  # noqa: BLE001
+            return "0.0.0.0"
 
     @staticmethod
     def _prune(clips: Path, keep: int = 30):
