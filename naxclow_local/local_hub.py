@@ -287,6 +287,10 @@ class LocalHub:
                 LOG.warning("%s: fără code 51, renunț", dev.uid)
                 return
             self.tcp_send(dev, {"code": 53, "target": dev.cli_id, "status": 1})
+            await asyncio.sleep(0.3)
+            # comanda aplicației „pornește video" + calitate (văzute în traficul real)
+            self.tcp_send(dev, {"code": 301, "target": dev.cli_id, "content": {"code": 3}})
+            self.tcp_send(dev, {"code": 301, "target": dev.cli_id, "content": {"speedGrade": 1, "code": 201}})
             while dev.online and time.time() < dev.stop_at:
                 self.udp.sendto(udp_sess_frame(dev.fid, jb({"timerStamp": str(int(time.time() * 1000)), "code": 54})),
                                 dev.udp_addr)
