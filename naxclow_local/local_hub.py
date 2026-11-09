@@ -70,6 +70,10 @@ class Device:
         self.clip = None
         self.clip_path: Path | None = None
         self.audio = None
+        self.asubs: set[asyncio.Queue] = set()
+        self.talk_seq = 0
+        self.talking = 0
+        self.started_at = 0.0
 
     @property
     def online(self):
@@ -194,8 +198,12 @@ class LocalHub:
             dev.seen_set.add(seq)
             if typ == 1:
                 self.video(dev, flag, payload)
-            elif dev.audio:
-                dev.audio.write(payload)
+            else:
+                if dev.audio:
+                    dev.audio.write(payload)
+                for q in list(dev.asubs):
+                    if not q.full():
+                        q.put_nowait(payload)
 
     async def dbg_summary(self):
         while True:
@@ -291,7 +299,11 @@ class LocalHub:
             # comanda aplicației „pornește video" + calitate (văzute în traficul real)
             self.tcp_send(dev, {"code": 301, "target": dev.cli_id, "content": {"code": 3}})
             self.tcp_send(dev, {"code": 301, "target": dev.cli_id, "content": {"speedGrade": 1, "code": 201}})
+            dev.started_at = time.time()
+            dev.talk_seq = 0
             while dev.online and time.time() < dev.stop_at:
+                if dev.subs or dev.asubs or dev.talking:
+                    dev.stop_at = min(max(dev.stop_at, time.time() + 6), dev.started_at + self.max_stream)
                 self.udp.sendto(udp_sess_frame(dev.fid, jb({"timerStamp": str(int(time.time() * 1000)), "code": 54})),
                                 dev.udp_addr)
                 self.udp.sendto(udp_sess_frame(dev.fid, b"", 101), dev.udp_addr)
@@ -397,7 +409,65 @@ class LocalHub:
                 dev.subs.discard(q)
             return resp
 
+        async def audio_wav(request):
+            dev = get_dev(request)
+            if not dev:
+                return web.Response(status=404, text="unknown device")
+            if not dev.streaming and not await hub.start_stream(dev, hub.max_stream, reason="viewer"):
+                return web.Response(status=503, text="device asleep")
+            q: asyncio.Queue = asyncio.Queue(maxsize=50)
+            dev.asubs.add(q)
+            resp = web.StreamResponse(headers={"Content-Type": "audio/wav"})
+            await resp.prepare(request)
+            # WAV „infinit": A-law (format 6), 8 kHz, mono, 8 biți
+            hdr = (b"RIFF" + struct.pack("<I", 0xFFFFFFFF) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 6, 1, 8000, 8000, 1, 8)
+                   + b"data" + struct.pack("<I", 0xFFFFFFFF))
+            try:
+                await resp.write(hdr)
+                while dev.streaming or not q.empty():
+                    try:
+                        chunk = await asyncio.wait_for(q.get(), 5)
+                    except asyncio.TimeoutError:
+                        if not dev.streaming:
+                            break
+                        continue
+                    await resp.write(chunk)
+            except (ConnectionResetError, asyncio.CancelledError):
+                pass
+            finally:
+                dev.asubs.discard(q)
+            return resp
+
+        async def talk(request):
+            """Primește A-law 8 kHz (body chunked) și îl trimite soneriei în pachete de 640 B / 80 ms."""
+            dev = get_dev(request)
+            if not dev or not dev.streaming or not dev.fid or not dev.udp_addr:
+                await request.read()
+                return web.Response(status=503, text="no active session")
+            dev.talking += 1
+            buf = b""
+            t0 = time.monotonic()
+            n = 0
+            try:
+                async for chunk in request.content.iter_chunked(4096):
+                    buf += chunk
+                    while len(buf) >= 640 and dev.fid:
+                        dev.talk_seq += 1
+                        pkt = struct.pack("<IHBB", 640, 4, 0, 1) + dev.fid + struct.pack("<I", dev.talk_seq) + buf[:640]
+                        hub.udp.sendto(pkt, dev.udp_addr)
+                        buf = buf[640:]
+                        n += 1
+                        delay = t0 + n * 0.08 - time.monotonic()
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+            finally:
+                dev.talking -= 1
+                hub.journal(f"L-TALK {dev.uid} {n} pachete")
+            return web.json_response({"ok": True, "packets": n})
+
         return [
+            web.get("/cam/{uid}/audio.wav", audio_wav),
+            web.post("/cam/{uid}/talk", talk),
             web.get("/cam/status", status),
             web.get("/cam/{uid}/snapshot.jpg", snapshot),
             web.get("/cam/{uid}/stream.mjpg", mjpeg),
