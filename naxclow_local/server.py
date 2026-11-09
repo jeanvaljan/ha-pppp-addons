@@ -303,6 +303,82 @@ async def tcp_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
             pass
 
 
+# ---------------- UDP (probabil media) ----------------
+
+class UdpUpstream(asyncio.DatagramProtocol):
+    def __init__(self, front, client):
+        self.front, self.client, self.transport = front, client, None
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data, addr):
+        self.front.stat("<", self.client, data)
+        self.front.transport.sendto(data, self.client)
+
+
+class UdpFront(asyncio.DatagramProtocol):
+    """Primește UDP de la sonerie; în proxy îl trimite la relay-ul real și întoarce răspunsurile."""
+
+    def __init__(self):
+        self.transport = None
+        self.ups: dict[tuple, UdpUpstream] = {}
+        self.counters: dict[tuple, list] = {}
+        self.fh = None
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def stat(self, tag, client, data):
+        key = (tag, client)
+        c = self.counters.setdefault(key, [0, 0, time.time()])
+        c[0] += 1
+        c[1] += len(data)
+        if c[0] <= 5:
+            journal(f"UDP{tag} {client[0]}:{client[1]} {len(data)}B {data[:48].hex(' ')}")
+        if TCP_CAPTURE:
+            if self.fh is None:
+                SHARE.mkdir(parents=True, exist_ok=True)
+                self.fh = open(SHARE / f"udp_{time.strftime('%Y%m%d_%H%M%S')}.bin", "wb")
+            self.fh.write(struct.pack("<cdI", tag.encode(), time.time(), len(data)) + data)
+            self.fh.flush()
+
+    def datagram_received(self, data, addr):
+        self.stat(">", addr, data)
+        if MODE != "proxy":
+            return
+        up = self.ups.get(addr)
+        if up is None:
+            host, port = (next(iter(REAL_TCP.values()), None)
+                          or (UPSTREAM_TCP.split(":")[0], int(UPSTREAM_TCP.split(":")[1])))
+            loop = asyncio.get_running_loop()
+            up = UdpUpstream(self, addr)
+            self.ups[addr] = up
+            asyncio.ensure_future(loop.create_datagram_endpoint(lambda: up, remote_addr=(host, port)))
+            journal(f"UDP~ {addr} -> upstream {host}:{port}")
+            # primul pachet îl trimitem după ce endpoint-ul e gata
+            async def later():
+                for _ in range(50):
+                    if up.transport:
+                        up.transport.sendto(data)
+                        return
+                    await asyncio.sleep(0.02)
+            asyncio.ensure_future(later())
+            return
+        if up.transport:
+            up.transport.sendto(data)
+
+
+async def udp_summary(front: UdpFront):
+    while True:
+        await asyncio.sleep(10)
+        for (tag, client), c in list(front.counters.items()):
+            if c[0]:
+                journal(f"UDP{tag} {client[0]} rezumat: {c[0]} pachete, {c[1]} B în ultimele ~10 s")
+                LOG.info("UDP%s %s: %d pachete / %d B", tag, client[0], c[0], c[1])
+            front.counters[(tag, client)] = [0, 0, time.time()]
+
+
 async def main():
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "info").upper(),
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -315,6 +391,10 @@ async def main():
              MODE, HTTP_PORT, local_ip(), UPSTREAM_HTTP, UPSTREAM_TCP)
     srv = await asyncio.start_server(tcp_handler, "0.0.0.0", TCP_PORT)
     LOG.info("TCP pe :%d (capture=%s)", TCP_PORT, TCP_CAPTURE)
+    front = UdpFront()
+    await asyncio.get_running_loop().create_datagram_endpoint(lambda: front, local_addr=("0.0.0.0", TCP_PORT))
+    asyncio.ensure_future(udp_summary(front))
+    LOG.info("UDP pe :%d", TCP_PORT)
     async with srv:
         await srv.serve_forever()
 
