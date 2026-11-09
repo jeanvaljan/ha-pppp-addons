@@ -23,6 +23,8 @@ from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, web
 
+from local_hub import LocalHub
+
 LOG = logging.getLogger("naxclow")
 MODE = os.environ.get("MODE", "local").strip()
 TCP_PORT = int(os.environ.get("TCP_PORT", "29838"))
@@ -35,6 +37,9 @@ HA_API = os.environ.get("HA_API", "http://supervisor/core/api")
 WWW = Path(os.environ.get("WWW_DIR", "/homeassistant/www/naxclow"))
 SHARE = Path(os.environ.get("SHARE_DIR", "/share/naxclow"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "80"))
+AUTO_STREAM = int(os.environ.get("AUTO_STREAM", "20"))
+MAX_STREAM = int(os.environ.get("MAX_STREAM", "60"))
+HUB: LocalHub | None = None
 
 # uid -> (host, port) real, învățat din răspunsurile cloud
 REAL_TCP: dict[str, tuple[str, int]] = {}
@@ -271,6 +276,10 @@ async def pipe(reader, writer, logger: FrameLogger):
 
 async def tcp_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     peer = writer.get_extra_info("peername")
+    if MODE == "local":
+        journal(f"TCP+ {peer} mod=local")
+        await HUB.handle_tcp(reader, writer)
+        return
     SHARE.mkdir(parents=True, exist_ok=True)
     fn = SHARE / f"tcp_{time.strftime('%Y%m%d_%H%M%S')}_{peer[0]}.bin"
     fh = open(fn, "wb") if TCP_CAPTURE else None
@@ -352,9 +361,10 @@ class UdpFront(asyncio.DatagramProtocol):
             self.fh.flush()
 
     def datagram_received(self, data, addr):
-        self.stat(">", addr, data)
-        if MODE != "proxy":
+        if MODE == "local":
+            HUB.handle_udp(data, addr)
             return
+        self.stat(">", addr, data)
         up = self.ups.get(addr)
         if up is None:
             host, port = (next(iter(REAL_TCP.values()), None)
@@ -390,7 +400,10 @@ async def udp_summary(front: UdpFront):
 async def main():
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "info").upper(),
                         format="%(asctime)s %(levelname)s %(message)s")
+    global HUB
+    HUB = LocalHub(SHARE, journal, fire_event, AUTO_STREAM, MAX_STREAM)
     app = web.Application(client_max_size=10 * 1024 * 1024)
+    app.router.add_routes(HUB.routes(web))
     app.router.add_route("*", "/{tail:.*}", http_any)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
@@ -401,6 +414,7 @@ async def main():
     LOG.info("TCP pe :%d (capture=%s)", TCP_PORT, TCP_CAPTURE)
     front = UdpFront()
     await asyncio.get_running_loop().create_datagram_endpoint(lambda: front, local_addr=("0.0.0.0", TCP_PORT))
+    HUB.udp = front.transport
     asyncio.ensure_future(udp_summary(front))
     LOG.info("UDP pe :%d", TCP_PORT)
     async with srv:
